@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-router.mjs\" setup", "timeout": 40 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-router.mjs\" route", "timeout": 25 }] }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Skill|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-router.mjs\" pretool", "timeout": 15 }]
+      }
+    ]
+  }
+}

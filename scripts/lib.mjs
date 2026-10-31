@@ -181,30 +181,41 @@ export function writeJson(file, value) {
 
 export const loadProfile = () => readJson(PROFILE, null);
 
-// Optional, user-written; absent by default. { "protect": [...], "ignore": [...], "fileRules": { kind: [...] }, ... }
+// Optional; absent by default. Two layers, the project's winning over the user's:
+//   ~/.claude/skill-router/overrides.json      — yours, every project on this machine
+//   <project>/.claude/skill-router.json        — committed with the repo, so it reaches cloud sessions and teammates
 // protect: never offered for cleanup. ignore: never routed or reminded. fileRules: replaces setup's choice for a kind.
 // extraSkillDirs: more folders of skills ("dir" or {dir, prefix}). minPromptChars: shortest prompt that gets routed.
+export function projectDir() {
+  return process.env.CLAUDE_PROJECT_DIR || process.env.SKILL_ROUTER_PROJECT || null;
+}
+
 export function loadOverrides() {
-  const o = readJson(path.join(DATA_DIR, 'overrides.json'), {});
+  const user = readJson(path.join(DATA_DIR, 'overrides.json'), {});
+  const dir = projectDir();
+  const proj = dir ? readJson(path.join(dir, '.claude', 'skill-router.json'), {}) : {};
+  const o = { ...user, ...proj };
+  const union = (k) => [...new Set([...(user[k] || []), ...(proj[k] || [])])];
   return {
-    protect: o.protect || [],
-    ignore: o.ignore || [],
-    fileRules: o.fileRules || {},
-    extraSkillDirs: o.extraSkillDirs || [],
+    protect: union('protect'),
+    ignore: union('ignore'),
+    fileRules: { ...(user.fileRules || {}), ...(proj.fileRules || {}) },
+    extraSkillDirs: union('extraSkillDirs'),
     minPromptChars: Number.isFinite(o.minPromptChars) ? o.minPromptChars : 25,
     // "notify" (default): suggest a model/effort when the task looks clearly over- or under-powered. "off": never.
     advisor: o.advisor === 'off' ? 'off' : 'notify',
-    // "auto" (default): inline inside the Claude desktop app, haiku elsewhere. "haiku": always ask a separate Haiku
-    // (needs a logged-in claude CLI). "inline": never call a model; the session's own model does the routing.
+    // "auto" (default): inline in the desktop app and in cloud sessions, haiku elsewhere. "haiku": always ask a
+    // separate Haiku (needs a logged-in claude CLI). "inline": never call a model; the session's own model routes.
     mode: ['haiku', 'inline'].includes(o.mode) ? o.mode : 'auto',
   };
 }
 
-// The desktop app does not hand its login to child processes, so a separate `claude -p` fails there. Route inline.
+// The desktop app does not hand its login to child processes, and a cloud session's login is not ours to borrow, so
+// a separate `claude -p` is not an option there. Route inline.
 export function routerMode() {
   const { mode } = loadOverrides();
   if (mode !== 'auto') return mode;
-  if (process.env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop' || authMissingRecently()) return 'inline';
+  if (process.env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop' || process.env.CLAUDE_CODE_REMOTE === 'true' || authMissingRecently()) return 'inline';
   return 'haiku';
 }
 
@@ -253,7 +264,10 @@ export function performMaintenance() {
 export async function readStdin() {
   let data = '';
   for await (const chunk of process.stdin) data += chunk;
-  return JSON.parse(data || '{}');
+  const input = JSON.parse(data || '{}');
+  // Hooks get CLAUDE_PROJECT_DIR; fall back to the session's cwd so project overrides still load.
+  if (input.cwd && !process.env.CLAUDE_PROJECT_DIR) process.env.SKILL_ROUTER_PROJECT = input.cwd;
+  return input;
 }
 
 // Dynamically searches PATH across platforms (including Windows .cmd, .exe, .bat, nvm/fnm paths).
@@ -346,18 +360,24 @@ function writeText(file, text) {
   fs.writeFileSync(file, text);
 }
 
-// Model the session last answered with, read from the transcript's newest assistant entry.
-export function currentModel(transcriptPath) {
+// Model and effort the session last ran with, read from the newest transcript entries. Effort is not passed to hooks
+// as an environment variable in every host, but the transcript records it per turn.
+export function currentSession(transcriptPath) {
+  let tail = '';
   try {
     const fd = fs.openSync(transcriptPath, 'r');
     const size = fs.fstatSync(fd).size;
-    const len = Math.min(size, 256 * 1024);
+    const len = Math.min(size, 512 * 1024);
     const buf = Buffer.alloc(len);
     fs.readSync(fd, buf, 0, len, size - len);
     fs.closeSync(fd);
-    const all = [...buf.toString('utf8').matchAll(/"model":"(claude-[^"]+)"/g)];
-    return all.length ? all[all.length - 1][1] : null;
-  } catch { return null; }
+    tail = buf.toString('utf8');
+  } catch {}
+  const last = (re) => { const all = [...tail.matchAll(re)]; return all.length ? all[all.length - 1][1] : null; };
+  return {
+    model: last(/"model":"(claude-[^"]+)"/g) || process.env.ANTHROPIC_MODEL || null,
+    effort: last(/"(?:perTurnEffort|effort)":"(low|medium|high|xhigh|max)"/g) || process.env.CLAUDE_EFFORT || null,
+  };
 }
 
 export const MODEL_TIERS = ['haiku', 'sonnet', 'opus', 'fable'];

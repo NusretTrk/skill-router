@@ -12,7 +12,17 @@ Claude Code rarely invokes installed skills on its own. This plugin makes it use
 - **inline** (default in the Claude desktop app): no extra model call, no delay, no login needed. The desktop app does not pass its login to child processes, so a separate `claude -p` cannot run there. Instead the session's own model, which already sees every skill, gets a short instruction to pick them, and on the first request (and later long, new tasks) a model/effort check. In the desktop app it can offer to switch model or effort with the session tools. Setup tuning is skipped; your `fileRules` still drive the file reminders.
 - **haiku** (default elsewhere): one Haiku call per request picks the skills and judges model/effort; a mismatch is shown to you as a one-line suggestion. Needs a logged-in `claude` CLI; without one, routing pauses for 15 minutes and tells you once.
 
-Force one with `"mode": "inline"` or `"mode": "haiku"` in `overrides.json`.
+Cloud sessions also use inline. Force one with `"mode": "inline"` or `"mode": "haiku"` in `overrides.json`.
+
+## Cloud sessions
+
+Cloud sessions (claude.ai/code, the mobile app, the desktop app's Cloud environments) don't install plugins and don't read `~/.claude`. They do run hooks committed to the repository. To use skill-router there:
+
+1. Copy `extras/cloud-loader.mjs` to `<repo>/.claude/hooks/skill-router.mjs`.
+2. Merge the hooks from `extras/cloud-settings.json` into `<repo>/.claude/settings.json`.
+3. Put the project's rules in `<repo>/.claude/skill-router.json` (same keys as `overrides.json`) and commit all three.
+
+At session start the loader shallow-clones this repository into `~/.cache/skill-router` inside the cloud VM and runs the hooks from there. On your own machine it exits immediately, because the installed plugin already runs, so nothing runs twice. Set `SKILL_ROUTER_REPO` / `SKILL_ROUTER_REF` on the cloud environment to pin another fork or a tag.
 
 ## Install
 
@@ -71,7 +81,7 @@ Delete `profile.json` to force a re-tune.
 
 ## Overrides (optional)
 
-Not needed — everything above is automatic. If you want the last word on something, create `~/.claude/skill-router/overrides.json`:
+Not needed — everything above is automatic. If you want the last word on something, create `~/.claude/skill-router/overrides.json` (yours, every project) or `<repo>/.claude/skill-router.json` (committed, reaches teammates and cloud sessions; wins over yours, lists are merged):
 
 ```json
 {

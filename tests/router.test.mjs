@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const script = (name) => path.join(ROOT, 'scripts', name);
 
-function sandbox({ overrides = {}, fake } = {}) {
+function sandbox({ overrides = {}, project, fake, transcriptLine } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-router-test-'));
   const appdata = path.join(home, 'AppData', 'Roaming');
   const skills = path.join(home, '.claude', 'skills');
@@ -35,12 +35,15 @@ function sandbox({ overrides = {}, fake } = {}) {
     }
   }
   const transcript = path.join(home, 't.jsonl');
-  fs.writeFileSync(transcript, '{"type":"assistant","message":{"model":"claude-opus-5-5"}}\n');
+  fs.writeFileSync(transcript, (transcriptLine || '{"type":"assistant","message":{"model":"claude-opus-5-5"}}') + '\n');
+  if (project) fs.writeFileSync(path.join(home, '.claude', 'skill-router.json'), JSON.stringify(project));
   const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: appdata, LOCALAPPDATA: path.join(home, 'nolocal'), CLAUDE_EFFORT: 'medium' };
-  delete env.SKILL_ROUTER_CHILD;
-  delete env.CLAUDE_CODE_ENTRYPOINT;
-  const run = (name, input, extraEnv = {}) => {
-    const res = spawnSync(process.execPath, [script(name)], { input: JSON.stringify({ session_id: 's1', cwd: home, transcript_path: transcript, ...input }), env: { ...env, ...extraEnv }, encoding: 'utf8' });
+  // Keep the host session's own variables out of the hooks under test.
+  for (const k of ['SKILL_ROUTER_CHILD', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_REMOTE', 'CLAUDE_PROJECT_DIR', 'ANTHROPIC_MODEL']) delete env[k];
+  // `file` runs another entry point (the cloud loader); extraEnv.ARGS is its single argument.
+  const run = (name, input, extraEnv = {}, file = script(name)) => {
+    const { ARGS, ...vars } = extraEnv;
+    const res = spawnSync(process.execPath, [file, ...(ARGS ? [ARGS] : [])], { input: JSON.stringify({ session_id: 's1', cwd: home, transcript_path: transcript, ...input }), env: { ...env, ...vars }, encoding: 'utf8' });
     return res.stdout ? JSON.parse(res.stdout) : null;
   };
   const read = (rel) => { try { return fs.readFileSync(path.join(home, '.claude', 'skill-router', rel), 'utf8'); } catch { return null; } };
@@ -131,4 +134,34 @@ test('extractJson reads the CLI envelope and ignores brackets in strings', async
   const { extractJson } = await import(pathToFileURL(script('lib.mjs')).href);
   assert.deepEqual(extractJson('noise {"a":"}{","b":[1]} tail', '{'), { a: '}{', b: [1] });
   assert.deepEqual(extractJson('pick ["x","y"]', '['), ['x', 'y']);
+});
+
+test('project overrides (.claude/skill-router.json) merge over user overrides', () => {
+  const sb = sandbox({ overrides: { fileRules: { ui: ['db-migrations'] }, ignore: ['x'] }, project: { fileRules: { ui: ['ui-polish'] } } });
+  const out = sb.run('pretool.mjs', { tool_name: 'Edit', tool_input: { file_path: 'Card.tsx', new_string: 'x' } });
+  assert.match(out.hookSpecificOutput.additionalContext, /ui-polish/);
+  assert.doesNotMatch(out.hookSpecificOutput.additionalContext, /db-migrations/);
+});
+
+test('cloud sessions route inline (no separate model call)', () => {
+  const sb = sandbox();
+  const out = sb.run('route.mjs', { prompt: TASK }, { CLAUDE_CODE_REMOTE: 'true' });
+  assert.match(out.hookSpecificOutput.additionalContext, /Skill router: before your first action/);
+  assert.equal(sb.read('auth-missing'), null);
+});
+
+test('effort and model come from the transcript when the host does not pass them', () => {
+  const sb = sandbox({ transcriptLine: '{"message":{"model":"claude-sonnet-5-5"},"perTurnEffort":"high"}' });
+  const out = sb.run('route.mjs', { prompt: TASK }, { ...DESKTOP, CLAUDE_EFFORT: '' });
+  assert.match(out.hookSpecificOutput.additionalContext, /runs on claude-sonnet-5-5 · effort high/);
+});
+
+test('cloud loader: silent locally, runs the cached copy in a cloud session', () => {
+  const sb = sandbox();
+  const loader = path.join(ROOT, 'extras', 'cloud-loader.mjs');
+  assert.equal(sb.run('route', { prompt: TASK }, { ARGS: 'route' }, loader), null, 'local: exits');
+  const cache = path.join(sb.home, '.cache', 'skill-router');
+  fs.cpSync(path.join(ROOT, 'scripts'), path.join(cache, 'scripts'), { recursive: true });
+  const out = sb.run('route', { prompt: TASK }, { ARGS: 'route', CLAUDE_CODE_REMOTE: 'true' }, loader);
+  assert.match(out.hookSpecificOutput.additionalContext, /Skill router/);
 });

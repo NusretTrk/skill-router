@@ -5,7 +5,7 @@
 //   suggestion goes to the user only when the current choice looks clearly too strong or too weak.
 import {
   buildCatalog, loadProfile, loadOverrides, loadState, saveState, askClaude, extractJson, log, readStdin,
-  authMissingRecently, currentModel, routerMode, MODEL_TIERS, EFFORTS, tierOf,
+  authMissingRecently, currentSession, routerMode, MODEL_TIERS, EFFORTS, tierOf,
 } from './lib.mjs';
 
 const MAX_PROMPT_CHARS = 16000;
@@ -131,8 +131,7 @@ async function main() {
 
   const state = loadState(input.session_id);
   state.invoked = state.invoked || [];
-  const nowModel = currentModel(input.transcript_path);
-  const nowEffort = process.env.CLAUDE_EFFORT || null;
+  const { model: nowModel, effort: nowEffort } = currentSession(input.transcript_path);
 
   if (routerMode() === 'inline') {
     const context = inlineContext({ prompt, state, nowModel, nowEffort, advisor });

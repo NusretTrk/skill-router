@@ -7,11 +7,11 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   DATA_DIR, PROFILE, FILE_KINDS, buildCatalog, catalogSignature, loadProfile, loadOverrides, writeJson,
-  askClaude, extractJson, log, readStdin,
+  askClaude, extractJson, log, prune, readStdin,
 } from './lib.mjs';
 
 // Bump when the setup prompt or profile format changes, so existing installs re-tune once.
-const SETUP_VERSION = 3;
+const SETUP_VERSION = 4;
 const LOCK = path.join(DATA_DIR, 'setup.lock');
 const LOCK_TTL_MS = 10 * 60 * 1000;
 
@@ -48,6 +48,7 @@ function launchBackground() {
 async function hook() {
   if (process.env.SKILL_ROUTER_CHILD) return;
   await readStdin().catch(() => ({}));
+  prune();
   const catalog = buildCatalog();
   const profile = loadProfile();
 

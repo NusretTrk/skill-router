@@ -45,7 +45,58 @@ function scan(dir, prefix, source, out) {
   }
 }
 
-// Every skill the model can invoke: user, claude.ai-synced, enabled plugins, then the project (wins on name clash).
+const listDirs = (dir) => { try { return fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => path.join(dir, e.name)); } catch { return []; } };
+
+// A plugin may keep its skills somewhere other than `skills/` and say so in plugin.json (`"skills": "./.claude/skills/"`).
+function pluginSkillDirs(root) {
+  const manifest = readJson(path.join(root, '.claude-plugin', 'plugin.json'), {});
+  const declared = manifest.skills ? [].concat(manifest.skills) : [];
+  return { name: manifest.name, dirs: [...new Set(['skills', ...declared].map(d => path.resolve(root, d)))] };
+}
+
+function scanPlugin(root, prefix, source, out) {
+  for (const dir of pluginSkillDirs(root).dirs) scan(dir, prefix, source, out);
+}
+
+// Data folders of the Claude desktop app. It installs plugins and the claude.ai skill bundle there, not under ~/.claude.
+function desktopRoots() {
+  const home = os.homedir();
+  const bases = [
+    process.env.SKILL_ROUTER_DESKTOP_DATA,
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Claude-Data'),
+    path.join(home, 'Library', 'Application Support', 'Claude-Data'),
+    path.join(home, 'Library', 'Application Support', 'Claude'),
+    path.join(home, '.config', 'Claude-Data'),
+  ].filter(Boolean);
+  // Each base holds one folder per signed-in profile (e.g. `claude_xxxx`); accept the base itself too.
+  return bases.flatMap(b => [b, ...listDirs(b)]).filter(d => fs.existsSync(path.join(d, 'rpm')) || fs.existsSync(path.join(d, 'local-agent-mode-sessions')));
+}
+
+function scanDesktop(out) {
+  for (const root of desktopRoots()) {
+    // rpm/<org>/<account>/manifest.json lists the installed plugins; each lives in a sibling folder named by id.
+    for (const org of listDirs(path.join(root, 'rpm'))) {
+      for (const account of listDirs(org)) {
+        const manifest = readJson(path.join(account, 'manifest.json'), null);
+        if (!manifest) continue;
+        for (const p of manifest.plugins || []) {
+          if (p.enabled === false || p.installationPreference === 'disabled') continue;
+          const dir = path.join(account, p.id);
+          const name = pluginSkillDirs(dir).name || p.name;
+          if (name) scanPlugin(dir, `${name}:`, `desktop:${name}`, out);
+        }
+      }
+    }
+    // The claude.ai skill bundle; keep only the most recently updated copy.
+    const bundles = listDirs(path.join(root, 'local-agent-mode-sessions', 'skills-plugin')).flatMap(listDirs)
+      .filter(d => fs.existsSync(path.join(d, 'skills')))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    if (bundles[0]) scanPlugin(bundles[0], `${pluginSkillDirs(bundles[0]).name || 'anthropic-skills'}:`, 'synced', out);
+  }
+}
+
+// Every skill the model can invoke: user, claude.ai-synced, enabled plugins (CLI and desktop app), extra dirs from
+// overrides, then the project (wins on name clash).
 export function buildCatalog(cwd) {
   const out = new Map();
   scan(path.join(CLAUDE_DIR, 'skills'), '', 'user', out);
@@ -61,15 +112,30 @@ export function buildCatalog(cwd) {
     const plugins = installed.plugins || installed;
     for (const [id, on] of Object.entries(settings.enabledPlugins || {})) {
       if (!on || !plugins[id]?.[0]?.installPath) continue;
-      scan(path.join(plugins[id][0].installPath, 'skills'), id.split('@')[0] + ':', `plugin:${id}`, out);
+      scanPlugin(plugins[id][0].installPath, id.split('@')[0] + ':', `plugin:${id}`, out);
     }
   } catch {}
+
+  scanDesktop(out);
+
+  for (const extra of loadOverrides().extraSkillDirs) {
+    const dir = typeof extra === 'string' ? extra : extra?.dir;
+    if (dir) scan(dir.replace(/^~(?=$|[\\/])/, os.homedir()), extra?.prefix || '', 'extra', out);
+  }
 
   if (cwd) scan(path.join(cwd, '.claude', 'skills'), '', 'project', out);
 
   // A local copy of a plugin skill (same name, e.g. `systematic-debugging` next to `superpowers:systematic-debugging`)
   // would be offered twice; keep the one the user installed directly.
-  return [...out.values()].filter(s => !(s.name.includes(':') && out.has(s.name.split(':').pop())));
+  const list = [...out.values()].filter(s => !(s.name.includes(':') && out.has(s.name.split(':').pop())));
+
+  // Aliases inside one plugin (same description, different name): keep the shortest name.
+  const seen = new Map();
+  for (const s of [...list].sort((a, b) => a.name.length - b.name.length)) {
+    const key = `${s.source}\n${s.description.toLowerCase().replace(/\W+/g, ' ').trim()}`;
+    if (s.description && seen.has(key)) s.alias = true; else seen.set(key, s.name);
+  }
+  return list.filter(s => !s.alias);
 }
 
 export function catalogSignature(catalog) {
@@ -87,11 +153,36 @@ export function writeJson(file, value) {
 
 export const loadProfile = () => readJson(PROFILE, null);
 
-// Optional, user-written; absent by default. { "protect": [...], "ignore": [...], "fileRules": { kind: [...] } }
+// Optional, user-written; absent by default. { "protect": [...], "ignore": [...], "fileRules": { kind: [...] }, ... }
 // protect: never offered for cleanup. ignore: never routed or reminded. fileRules: replaces setup's choice for a kind.
+// extraSkillDirs: more folders of skills ("dir" or {dir, prefix}). minPromptChars: shortest prompt that gets routed.
 export function loadOverrides() {
   const o = readJson(path.join(DATA_DIR, 'overrides.json'), {});
-  return { protect: o.protect || [], ignore: o.ignore || [], fileRules: o.fileRules || {} };
+  return {
+    protect: o.protect || [],
+    ignore: o.ignore || [],
+    fileRules: o.fileRules || {},
+    extraSkillDirs: o.extraSkillDirs || [],
+    minPromptChars: Number.isFinite(o.minPromptChars) ? o.minPromptChars : 200,
+  };
+}
+
+// Housekeeping, run at session start: drop session records older than two weeks and keep the log under ~1 MB.
+export function prune() {
+  const cutoff = Date.now() - 14 * 24 * 3600 * 1000;
+  const dir = path.join(DATA_DIR, 'state');
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      const file = path.join(dir, f);
+      if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file, { force: true });
+    }
+  } catch {}
+  const logFile = path.join(DATA_DIR, 'router.log');
+  try {
+    if (fs.statSync(logFile).size > 1024 * 1024) {
+      fs.writeFileSync(logFile, fs.readFileSync(logFile, 'utf8').split('\n').slice(-2000).join('\n'));
+    }
+  } catch {}
 }
 
 const stateFile = (sid) => path.join(DATA_DIR, 'state', `${String(sid).replace(/[^\w-]/g, '')}.json`);

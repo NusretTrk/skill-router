@@ -42,13 +42,24 @@ Not needed — everything above is automatic. If you want the last word on somet
 {
   "protect": ["my-skill"],
   "ignore": ["skill-i-never-want-suggested"],
-  "fileRules": { "ui": ["impeccable"] }
+  "fileRules": { "ui": ["impeccable"] },
+  "extraSkillDirs": [{ "dir": "~/my-skills", "prefix": "mine:" }],
+  "minPromptChars": 120
 }
 ```
 
 - `protect`: never offered for cleanup.
 - `ignore`: never routed or reminded.
 - `fileRules`: replaces the tuned skills for a file kind (`ui`, `motion`, `test`, `e2e`, `reactNative`, `swift`, `android`, `python`, `rust`, `go`, `sql`, `infra`, `llmApp`, `designSpec`, `skillFile`).
+
+- `extraSkillDirs`: more folders of skills to include.
+- `minPromptChars`: shortest message that gets routed (default 200).
+
+## Which skills it sees
+
+User skills (`~/.claude/skills`), claude.ai-synced skills, plugins enabled in `~/.claude/settings.json`, plugins installed through the Claude desktop app (Windows `%LOCALAPPDATA%\Claude-Data`, macOS `~/Library/Application Support/Claude-Data`; set `SKILL_ROUTER_DESKTOP_DATA` if yours lives elsewhere), and the project's `.claude/skills`. A plugin's skills are read from `skills/` and from the `skills` path its `plugin.json` declares. Aliases (same plugin, same description) are counted once.
+
+Session records older than two weeks are deleted and `router.log` is kept under ~1 MB.
 
 Requires Node.js on PATH.
 

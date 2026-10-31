@@ -1,6 +1,6 @@
 {
   "name": "skill-router",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Makes Claude actually use your installed skills: a cheap Haiku pass picks the skills each task needs, and edits remind the model about skills for that file type. Adapts itself to whatever skills you have installed.",
   "author": { "name": "Ilke" },
   "license": "MIT",

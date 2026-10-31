@@ -4,7 +4,7 @@
       { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs\"", "timeout": 10 }] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/route.mjs\"", "timeout": 90 }] }
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/route.mjs\"", "timeout": 25 }] }
     ],
     "PreToolUse": [
       {

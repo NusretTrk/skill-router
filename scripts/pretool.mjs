@@ -11,8 +11,11 @@ async function main() {
   const state = loadState(sid);
 
   if (input.tool_name === 'Skill') {
-    if (args.skill && !state.invoked.includes(args.skill)) {
-      state.invoked.push(args.skill);
+    if (args.skill) {
+      const full = args.skill;
+      const short = full.split(':').pop();
+      if (!state.invoked.includes(full)) state.invoked.push(full);
+      if (!state.invoked.includes(short)) state.invoked.push(short);
       saveState(sid, state);
     }
     return;
@@ -20,18 +23,34 @@ async function main() {
 
   const profile = loadProfile();
   const file = args.file_path || args.notebook_path || '';
-  if (!profile || !file) return;
+  if (!file) return;
   const overrides = loadOverrides();
-  const rules = { ...profile.fileRules, ...overrides.fileRules };
+  // Without a tuned profile (inline mode never tunes) the user's own fileRules still apply.
+  const rules = { ...(profile?.fileRules || {}), ...overrides.fileRules };
   const content = [args.content, args.new_string, ...(args.edits || []).map(e => e.new_string)].filter(Boolean).join('\n');
 
   const matched = Object.entries(rules).filter(([kind]) => FILE_KINDS[kind]?.test(file, content)).flatMap(([, skills]) => skills);
   if (!matched.length) return;
   const known = new Set(buildCatalog(input.cwd).map(s => s.name));
-  const due = [...new Set(matched)].filter(s => known.has(s) && !overrides.ignore.includes(s) && !state.invoked.includes(s) && !state.reminded.includes(s));
+
+  // Avoid repetitive/spurious reminders: check both namespaced and short name against invoked, reminded, and already routed
+  const isDue = (s) => {
+    const short = s.split(':').pop();
+    if (overrides.ignore.includes(s) || overrides.ignore.includes(short)) return false;
+    if (state.invoked.includes(s) || state.invoked.includes(short)) return false;
+    if (state.reminded.includes(s) || state.reminded.includes(short)) return false;
+    if ((state.routed || []).includes(s) || (state.routed || []).includes(short)) return false;
+    return true;
+  };
+
+  const due = [...new Set(matched)].filter(s => known.has(s) && isDue(s));
   if (!due.length) return;
 
-  state.reminded.push(...due);
+  for (const s of due) {
+    state.reminded.push(s);
+    const short = s.split(':').pop();
+    if (!state.reminded.includes(short)) state.reminded.push(short);
+  }
   saveState(sid, state);
   log(`remind session=${sid} file=${path.basename(file)} skills=${JSON.stringify(due)}`);
 

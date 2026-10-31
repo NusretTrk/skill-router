@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   DATA_DIR, PROFILE, FILE_KINDS, buildCatalog, catalogSignature, loadProfile, loadOverrides, writeJson,
-  askClaude, extractJson, log, prune, readStdin,
+  askClaude, extractJson, log, prune, readStdin, routerMode,
 } from './lib.mjs';
 
 // Bump when the setup prompt or profile format changes, so existing installs re-tune once.
@@ -49,6 +49,8 @@ async function hook() {
   if (process.env.SKILL_ROUTER_CHILD) return;
   await readStdin().catch(() => ({}));
   prune();
+  // Inline mode makes no model calls, so there is nothing to tune in the background.
+  if (routerMode() === 'inline') return;
   const catalog = buildCatalog();
   const profile = loadProfile();
 

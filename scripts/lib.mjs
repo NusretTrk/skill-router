@@ -164,19 +164,33 @@ export function loadOverrides() {
     fileRules: o.fileRules || {},
     extraSkillDirs: o.extraSkillDirs || [],
     minPromptChars: Number.isFinite(o.minPromptChars) ? o.minPromptChars : 200,
+    // "notify" (default): suggest a model/effort when the task looks clearly over- or under-powered. "off": never.
+    advisor: o.advisor === 'off' ? 'off' : 'notify',
+    // "auto" (default): inline inside the Claude desktop app, haiku elsewhere. "haiku": always ask a separate Haiku
+    // (needs a logged-in claude CLI). "inline": never call a model; the session's own model does the routing.
+    mode: ['haiku', 'inline'].includes(o.mode) ? o.mode : 'auto',
   };
+}
+
+// The desktop app does not hand its login to child processes, so a separate `claude -p` fails there. Route inline.
+export function routerMode() {
+  const { mode } = loadOverrides();
+  if (mode !== 'auto') return mode;
+  if (process.env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop' || authMissingRecently()) return 'inline';
+  return 'haiku';
 }
 
 // Housekeeping, run at session start: drop session records older than two weeks and keep the log under ~1 MB.
 export function prune() {
   const cutoff = Date.now() - 14 * 24 * 3600 * 1000;
-  const dir = path.join(DATA_DIR, 'state');
-  try {
-    for (const f of fs.readdirSync(dir)) {
-      const file = path.join(dir, f);
-      if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file, { force: true });
-    }
-  } catch {}
+  for (const dir of [path.join(DATA_DIR, 'state'), path.join(DATA_DIR, 'prompts')]) {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        const file = path.join(dir, f);
+        if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file, { force: true });
+      }
+    } catch {}
+  }
   const logFile = path.join(DATA_DIR, 'router.log');
   try {
     if (fs.statSync(logFile).size > 1024 * 1024) {
@@ -212,10 +226,22 @@ function claudeExe() {
 }
 
 // Runs a one-shot, tool-less, plugin-less `claude -p` so it neither recurses into these hooks nor loads the user's setup.
+// While the CLI has no login, every call fails after a few seconds. Remember that for a while instead of paying the
+// wait on every prompt. Cleared by any successful call.
+const AUTH_FLAG = path.join(DATA_DIR, 'auth-missing');
+const AUTH_RETRY_MS = 15 * 60 * 1000;
+export function authMissingRecently() {
+  try { return Date.now() - fs.statSync(AUTH_FLAG).mtimeMs < AUTH_RETRY_MS; } catch { return false; }
+}
+
 export function askClaude({ model, system, message, timeout }) {
   const exe = claudeExe();
+  // The system prompt goes through a file: no Windows command-line length limit, and an identical prefix on every
+  // call so the API can serve it from the prompt cache.
+  const sysFile = path.join(DATA_DIR, 'prompts', crypto.createHash('sha1').update(system).digest('hex').slice(0, 12) + '.txt');
+  if (!fs.existsSync(sysFile)) writeText(sysFile, system);
   const base = ['-p', '--model', model, '--setting-sources', '', '--strict-mcp-config', '--tools', '',
-    '--disable-slash-commands', '--no-session-persistence'];
+    '--disable-slash-commands', '--no-session-persistence', '--output-format', 'json'];
   const opts = {
     cwd: os.tmpdir(),
     encoding: 'utf8',
@@ -224,11 +250,50 @@ export function askClaude({ model, system, message, timeout }) {
     env: { ...process.env, SKILL_ROUTER_CHILD: '1' },
   };
   const res = exe
-    ? spawnSync(exe, [...base, '--system-prompt', system], { ...opts, input: message })
+    ? spawnSync(exe, [...base, '--system-prompt-file', sysFile], { ...opts, input: message })
     // Unknown install location: go through the shell and carry the instructions in the message instead.
     : spawnSync('claude', base.map(a => (a === '' ? '""' : a)), { ...opts, shell: true, input: `${system}\n\n${message}` });
-  return { text: res.stdout || '', status: res.status, error: res.error?.message };
+
+  const raw = `${res.stdout || ''}\n${res.stderr || ''}`;
+  const out = extractJson(res.stdout || '', '{');
+  const text = out?.result ?? res.stdout ?? '';
+  if (/not logged in|please run \/login|invalid api key/i.test(out?.is_error ? text : raw)) {
+    writeText(AUTH_FLAG, String(Date.now()));
+    return { text: '', status: res.status, error: 'not-logged-in' };
+  }
+  if (out && !out.is_error) fs.rmSync(AUTH_FLAG, { force: true });
+  const u = out?.usage || {};
+  return {
+    text,
+    status: res.status,
+    error: res.error?.message || (out?.is_error ? String(text).slice(0, 200) : undefined),
+    cost: out?.total_cost_usd,
+    tokens: { in: u.input_tokens, cacheRead: u.cache_read_input_tokens, cacheWrite: u.cache_creation_input_tokens, out: u.output_tokens },
+  };
 }
+
+function writeText(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, text);
+}
+
+// Model the session last answered with, read from the transcript's newest assistant entry.
+export function currentModel(transcriptPath) {
+  try {
+    const fd = fs.openSync(transcriptPath, 'r');
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, 256 * 1024);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    fs.closeSync(fd);
+    const all = [...buf.toString('utf8').matchAll(/"model":"(claude-[^"]+)"/g)];
+    return all.length ? all[all.length - 1][1] : null;
+  } catch { return null; }
+}
+
+export const MODEL_TIERS = ['haiku', 'sonnet', 'opus', 'fable'];
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+export const tierOf = (model) => MODEL_TIERS.findIndex(t => String(model || '').toLowerCase().includes(t));
 
 export function extractJson(text, open) {
   const close = open === '[' ? ']' : '}';
